@@ -1,43 +1,66 @@
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const UPLOAD_DIR = './cloud_storage';
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
-
-let currentFileStream = null;
+// Memory to hold our two VIP connections
+let hardwareSocket = null;
+let appSocket = null;
 
 wss.on('connection', (ws) => {
-    console.log('ESP32 Cloud Drive Connected');
-    
+    console.log('⚡ New connection to JanuOS Relay!');
+
     ws.on('message', (data, isBinary) => {
-        if (!isBinary) {
-            const msg = data.toString();
-            if (msg.startsWith("FILE_START:")) {
-                const fileName = msg.split(":")[1];
-                currentFileStream = fs.createWriteStream(path.join(UPLOAD_DIR, fileName));
-                console.log(`Receiving: ${fileName}`);
-            } else if (msg === "FILE_END") {
-                if (currentFileStream) currentFileStream.end();
-                console.log("File saved successfully.");
+        if (isBinary) return; // We are only routing JSON text right now
+        
+        try {
+            const msg = JSON.parse(data.toString());
+            
+            // 1. REGISTRATION: Who just connected?
+            if (msg.action === 'register') {
+                if (msg.role === 'hardware') {
+                    hardwareSocket = ws;
+                    console.log('✅ ESP32 Hardware Registered!');
+                } else if (msg.role === 'app') {
+                    appSocket = ws;
+                    console.log('✅ Python App Registered!');
+                }
+                return;
             }
-        } else if (currentFileStream) {
-            currentFileStream.write(data);
+
+            // 2. ROUTING: Python -> ESP32
+            if (msg.target === 'hardware' && hardwareSocket) {
+                console.log(`Forwarding command [${msg.command}] to ESP32`);
+                hardwareSocket.send(JSON.stringify(msg));
+            }
+            
+            // 3. ROUTING: ESP32 -> Python
+            if (msg.target === 'app' && appSocket) {
+                console.log(`Forwarding response to Python`);
+                appSocket.send(JSON.stringify(msg));
+            }
+
+        } catch (e) {
+            console.log('Ignored non-JSON message:', data.toString());
+        }
+    });
+
+    ws.on('close', () => {
+        if (ws === hardwareSocket) {
+            console.log('❌ ESP32 Hardware Disconnected');
+            hardwareSocket = null;
+        }
+        if (ws === appSocket) {
+            console.log('❌ Python App Disconnected');
+            appSocket = null;
         }
     });
 });
 
-app.get('/', (req, res) => res.send('Cloud Storage Tunnel Active.'));
-app.get('/files', (req, res) => res.json(fs.readdirSync(UPLOAD_DIR)));
+app.get('/', (req, res) => res.send('JanuOS Global Relay is Active! 🚀'));
 
 const PORT = process.env.PORT || 3000;
-// This tells Render to show your index.html file when you visit the main URL
-app.use(express.static('public')); 
-
-server.listen(PORT, '0.0.0.0', () => console.log(`Server on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
